@@ -19,8 +19,19 @@ The value is a list of maps representing the data in that row of the table.
 Currently on supports string and int64 types with no foreign keys
 */
 type DB struct {
-	Data  map[string][]map[string]interface{}
-	Types map[string]map[string]reflect.Kind
+	Tables map[string]*Table
+}
+
+/*
+The table struct provides a structure in memory for the tables that will be
+in the Database. Each table will have their own table struct isolating the
+table information to their own struct.
+*/
+type Table struct {
+	Data        []map[string]interface{}
+	Types       map[string]reflect.Kind
+	ColumnIndex map[string]int64
+	Writer      *csv.Writer
 }
 
 /*
@@ -28,8 +39,7 @@ Returns a new database instance
 */
 func NewDB() *DB {
 	return &DB{
-		Data:  make(map[string][]map[string]interface{}),
-		Types: make(map[string]map[string]reflect.Kind),
+		Tables: make(map[string]*Table),
 	}
 }
 
@@ -56,11 +66,20 @@ func (d *DB) Ingest(folderPath string) error {
 			continue
 		}
 		dirLocation := folderLocation + "/" + tableFolderName
-		columnNames, columnTypes, tableValues, err := openProcessData(dirLocation)
 
+		newTable := &Table{}
+		columnNames, columnTypes, tableValues, writer, err := openProcessData(dirLocation)
+
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Process the types
 		newTypes := make(map[string]reflect.Kind)
+		newColumnIndex := make(map[string]int64)
 		for i, v := range columnTypes {
 			columnName := columnNames[i]
+			newColumnIndex[columnName] = int64(i)
 			if v == "int64" {
 				newTypes[columnName] = reflect.Int64
 			} else {
@@ -68,13 +87,9 @@ func (d *DB) Ingest(folderPath string) error {
 			}
 		}
 
-		if err != nil {
-			log.Fatal(err)
-		}
-
+		// process the data
 		numRecords := len(tableValues)
-
-		newTable := make([]map[string]interface{}, 0)
+		newData := make([]map[string]interface{}, 0)
 		for i := 0; i < numRecords; i++ {
 			row := tableValues[i]
 			newRow := make(map[string]interface{})
@@ -85,12 +100,17 @@ func (d *DB) Ingest(folderPath string) error {
 					newRow[columnNames[j]] = v
 				}
 			}
-			newTable = append(newTable, newRow)
+			newData = append(newData, newRow)
 		}
 
 		tableName := strings.Split(tableFolderName, ".")[0]
-		d.Data[tableName] = newTable
-		d.Types[tableName] = newTypes
+		newTable.Data = newData
+		// d.Data[tableName] = newData
+		newTable.Types = newTypes
+		// d.Types[tableName] = newTypes
+		newTable.ColumnIndex = newColumnIndex
+		newTable.Writer = writer
+		d.Tables[tableName] = newTable
 	}
 
 	return nil
@@ -108,7 +128,7 @@ Types of each column
 Data of the whole table
 err - if there is any error
 */
-func openProcessData(dirPath string) (columnNames, columnTypes []string, tableData [][]string, err error) {
+func openProcessData(dirPath string) (columnNames, columnTypes []string, tableData [][]string, writer *csv.Writer, err error) {
 	tableInfo, _ := os.ReadDir(dirPath)
 	var columnNamesCheck []string
 
@@ -121,11 +141,12 @@ func openProcessData(dirPath string) (columnNames, columnTypes []string, tableDa
 				continue
 			}
 
-			fileInfo, _ := os.Open(dirPath + "/" + fileName)
+			fileInfo, _ := os.OpenFile(dirPath+"/"+fileName, os.O_APPEND|os.O_RDWR, os.ModeAppend)
 			reader := csv.NewReader(fileInfo)
+			writer = csv.NewWriter(fileInfo)
 			records, err := reader.ReadAll()
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			fmt.Println(records)
 			columnNames = records[0]
@@ -141,7 +162,7 @@ func openProcessData(dirPath string) (columnNames, columnTypes []string, tableDa
 			reader := csv.NewReader(fileInfo)
 			records, err := reader.ReadAll()
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			columnNamesCheck = records[0]
 			columnTypes = records[1]
@@ -165,7 +186,7 @@ func openProcessData(dirPath string) (columnNames, columnTypes []string, tableDa
 }
 
 func (d *DB) CheckData(tableName string) {
-	fmt.Println(d.Data[tableName])
+	fmt.Println(d.Tables[tableName])
 }
 
 /*
@@ -209,12 +230,17 @@ func (d *DB) Get(dst interface{}, index int) error {
 
 	tableName := getTableName(dst)
 
-	table, ok := d.Data[tableName]
+	// table, ok := d.Data[tableName]
+	table, ok := d.Tables[tableName]
 	if !ok {
 		return fmt.Errorf("TABLE DONT EXIST")
 	}
 
-	record := table[index]
+	if len(table.Data) <= index {
+		return fmt.Errorf("index exceed table size")
+	}
+
+	record := table.Data[index]
 	for i := 0; i < dstType.NumField(); i++ {
 		structField := dstType.Field(i)
 		structName := structField.Tag.Get("dpool")
@@ -244,15 +270,13 @@ func (d *DB) Filter(dst interface{}, columnName string, filterFunc interface{}) 
 	dstTypeElemType := dstType.Elem().Elem()
 
 	tableName := getTableName(dst)
-	table, ok := d.Data[tableName]
+	table, ok := d.Tables[tableName]
 	if !ok {
 		return fmt.Errorf("TABLE DONT EXIST")
 	}
 
-	types, ok := d.Types[tableName]
-	if !ok {
-		return fmt.Errorf("not types record of this table")
-	}
+	data := table.Data
+	types := table.Types
 
 	columnKind, ok := types[columnName]
 	if !ok {
@@ -268,8 +292,8 @@ func (d *DB) Filter(dst interface{}, columnName string, filterFunc interface{}) 
 	fmt.Println("filterfunc is valid")
 	filterFuncValue := reflect.ValueOf(filterFunc)
 
-	for i := 0; i < len(table); i++ {
-		record := table[i]
+	for i := 0; i < len(data); i++ {
+		record := data[i]
 		columnValue := reflect.ValueOf(record[columnName])
 		validVal := filterFuncValue.Call([]reflect.Value{columnValue})
 		isValid := validVal[0]
@@ -294,10 +318,7 @@ func (d *DB) Filter(dst interface{}, columnName string, filterFunc interface{}) 
 
 		newSlice := reflect.Append(dstValue, newDstElemValue)
 		dstValue.Set(newSlice)
-
 	}
-	// index := 1
-	// record := table[index]
 
 	return nil
 }
@@ -351,7 +372,7 @@ is not suported
 func (d *DB) Set(src interface{}) error {
 
 	tableName := getTableName(src)
-	_, ok := d.Data[tableName]
+	table, ok := d.Tables[tableName]
 	if !ok {
 		// should it be an upsert?
 		return fmt.Errorf("table does not exist for this data")
@@ -374,9 +395,46 @@ func (d *DB) Set(src interface{}) error {
 
 	}
 
-	d.Data[tableName] = append(d.Data[tableName], newRecord)
+	table.Data = append(table.Data, newRecord)
+
+	// set to file
+	columnIndex := table.ColumnIndex
+	numColumns := len(columnIndex)
+	rowRecord := make([]string, numColumns)
+	for k, v := range newRecord {
+		index := columnIndex[k]
+		rowRecord[index] = fmt.Sprintf("%v", v)
+	}
+
+	err := appendToCsvFile(table.Writer, rowRecord)
+	if err != nil {
+		log.Println("Error appending")
+		return err
+	}
 
 	return nil
+}
+
+/*
+Appends records to csv file.
+Underneath, it uses csv.WriteAll to append into the csv file.
+*/
+func appendToCsvFile(writer *csv.Writer, record []string) error {
+	records := make([][]string, 1)
+	records[0] = record
+	err := writer.WriteAll(records)
+
+	// err := writer.Write(record)
+	// writer.Flush()
+
+	fmt.Println(err)
+	return err
+}
+
+func batchAppendToCsvFile(writer *csv.Writer, records [][]string) error {
+
+	err := writer.WriteAll(records)
+	return err
 }
 
 // type User struct {

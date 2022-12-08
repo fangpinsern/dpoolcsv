@@ -69,5 +69,50 @@ func TestDpoolCsvFilter(t *testing.T) {
 	assert.Nil(t, err)
 
 	assert.Equal(t, 2, len(getFoods))
+}
 
+func TestDpoolCsvSet(t *testing.T) {
+	t.Parallel()
+
+	newDpoolStore := dpoolcsv.NewDB()
+
+	newDpoolStore.Ingest("/data")
+
+	getUsers := make([]*User, 0)
+	firstName := "Fang"
+	lastName := "PS"
+	age := int64(21)
+	userId := "4"
+
+	newSetUser := &User{
+		FirstName: firstName,
+		LastName:  lastName,
+		Age:       age,
+		UserId:    userId,
+	}
+
+	err := newDpoolStore.Set(newSetUser)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	err = newDpoolStore.Filter(&getUsers, "firstname", func(columnVal string) bool {
+		return columnVal == "Fang"
+	})
+
+	fmt.Println(err)
+
+	assert.Equal(t, 1, len(getUsers))
+	assert.Equal(t, firstName, getUsers[0].FirstName)
+	assert.Equal(t, lastName, getUsers[0].LastName)
+
+	getFoods := make([]*Food, 0)
+	limit := int64(20)
+
+	err = newDpoolStore.Filter(&getFoods, "price", func(columnValue int64) bool {
+		return columnValue <= limit
+	})
+	assert.Nil(t, err)
+
+	assert.Equal(t, 2, len(getFoods))
 }
